@@ -1,0 +1,529 @@
+'use strict';
+const schedule = require('node-schedule');
+const CronJob = require('cron').CronJob;
+const Cron = require('./mongodb_backup.js');
+const config = require('./config/environment');
+var Agenda = require('agenda');
+var os = require('os');
+const url = require('url');
+const dateFormat = require('dateformat');
+const async = require('async');
+const _ = require('lodash');
+const FileConfig = require('./file_server.js');
+const fs = require('fs');
+//const ursa = require('ursa');
+const crypto = require('crypto');
+const algorithm = 'aes-256-ecb';
+var pdf = require('html-pdf');
+// var NodeRSA = require('node-rsa');
+
+function encrypt(buffer, password) {
+  var cipher = crypto.createCipher(algorithm, password)
+  var crypted = Buffer.concat([cipher.update(buffer), cipher.final()]);
+  return crypted;
+}
+
+function decrypt(buffer, password) {
+  var decipher = crypto.createDecipher(algorithm, password)
+  var dec = Buffer.concat([decipher.update(buffer), decipher.final()]);
+  return dec;
+}
+
+
+const User = require('../server/api/user/user.model.js');
+const InternalUserLoginProfile = require('../server/api/internal-user-login-profile/internal-user-login-profile.model')
+const BidderProfile = require('../server/api/bidder-profile/bidder-profile.model.js');
+const Mail = require('../server/mail.js');
+const EmailTemplate = require('../server/api/email-template/email-template.model.js');
+const EmailSubscriptionMapping = require('../server/api/email-subscription-mapping/email-subscription-mapping.model.js');
+const TenderLogs = require('../server/api/tender-log/tender-log.model.js');
+const TenderLineObjects = require('../server/api/tender-line-object/tender-line-object.model');
+const TenderCoversEncryptedDocument = require('../server/api/tender-covers-encrypted-document/tender-covers-encrypted-document.model');
+const OrganizationLevelAlteredDocuments = require('../server/api/organization-level-altered-document/organization-level-altered-document.model');
+const OrganizationLevelBlacklistedUser = require('../server/api/organization-level-blacklisted-user/organization-level-blacklisted-user.model');
+const WormLog = require('../server/api/worm-log/worm-log.model');
+const TenderLog = require('../server/api/tender-log/tender-log.model');
+
+  var blacklistedUser = schedule.scheduleJob('0 0 * * *',function(){
+    var tdate = new Date();
+    tdate.setHours(0,0,0,0);
+    var bdate = new Date(tdate);
+    var now = new Date();
+    now.setDate(now.getDate() - 1);
+    now.setHours(0,0,0,0);
+    var nowd = new Date(now)
+
+    OrganizationLevelBlacklistedUser.update({'status' : true,'date_till' : {$gte : nowd,$lte : bdate}},
+      {$set:{'status' : false, 'reinstated_at' : new Date(), 'is_auto_reinstated' : true}},{multi: true},
+    function(err,blocklist){
+    if(err){ console.log(err) }
+    console.log(blocklist.nModified +' Bidders Reinstated')
+    })
+
+  })
+
+
+var expiredDSCFifteenDays = schedule.scheduleJob('0 0 * * *', function () {
+
+  var tdate = new Date();
+  tdate.setDate(tdate.getDate() + 14);
+  tdate.setHours(0, 0, 0, 0)
+  var bdate = new Date(tdate);
+  console.log(bdate)
+  var now = new Date();
+  console.log(now)
+  console.log(dateFormat(now, "dddd, mmmm dS, yyyy, h:MM:ss TT"))
+
+  var todate = new Date();
+  todate.setDate(todate.getDate() + 15);
+  todate.setHours(0, 0, 0, 0)
+  var adate = new Date(todate);
+  console.log(adate)
+
+  User.find({
+    "dsc_details.expiry_date": {
+      $lte: adate,
+      $gte: bdate
+    }
+  }, {
+      _id: 1
+    }, function (err, user) {
+      if (err) {
+        console.log(err)
+      }
+      if (user) {
+        var userids = user.map(function (item) {
+          return item._id;
+        });
+        InternalUserLoginProfile.find({
+          user: {
+            $in: userids
+          }
+        }, function (err, iuser) {
+          if (err) {
+            console.log(err);
+          }
+          if (!iuser) {
+            console.log(iuser);
+          }
+          if (iuser) {
+            var iusermail = iuser.map(function (item) {
+              return item.user_details.user_email
+            })
+            InternalUserLoginProfile.populate(iuser, [{
+              path: 'user',
+              select: ['dsc_details.serial_number', 'dsc_details.expiry_date', 'dsc_details.issuer_common_name', 'userName']
+            }], function (err, users) {
+              // Mail.dscExpiry(users)
+
+            })
+          }
+        })
+
+        BidderProfile.find({
+          user: {
+            $in: userids
+          }
+        }, {
+            "personProfile.email": 1
+          }, function (err, buser) {
+            if (err) {
+              console.log(err);
+            }
+            if (!buser) {
+              console.log(buser);
+            }
+            if (buser) {
+              var busermail = buser.map(function (item) {
+                return item.personProfile.email
+              })
+              BidderProfile.populate(buser, [{
+                path: 'user',
+                select: ['dsc_details.serial_number', 'dsc_details.expiry_date', 'dsc_details.issuer_common_name', 'userName']
+              }]),
+                function (err, users) {
+                  // Mail.dscExpiry(buser)
+                }
+            }
+          })
+      }
+    })
+});
+
+
+
+var expiredDSCThirtyDays = schedule.scheduleJob('0 0 * * *', function () {
+  var tdate = new Date();
+  tdate.setDate(tdate.getDate() + 29);
+  tdate.setHours(0, 0, 0, 0)
+  var bdate = new Date(tdate);
+  var todate = new Date();
+  todate.setDate(todate.getDate() + 30);
+  todate.setHours(0, 0, 0, 0)
+  var adate = new Date(todate);
+  User.find({
+    "dsc_details.expiry_date": {
+      $lte: adate,
+      $gte: bdate
+    }
+  }, {
+      _id: 1
+    }, function (err, user) {
+      if (err) {
+        console.log(err)
+      }
+      if (user) {
+        var userids = user.map(function (item) {
+          return item._id;
+        });
+
+        InternalUserLoginProfile.find({
+          user: {
+            $in: userids
+          }
+        }, function (err, iuser) {
+          if (err) {
+            console.log(err);
+          }
+          if (!iuser) {
+            console.log(iuser);
+          }
+          if (iuser) {
+            var iusermail = iuser.map(function (item) {
+              return item.user_details.user_email
+            })
+            InternalUserLoginProfile.populate(iuser, [{
+              path: 'user',
+              select: ['dsc_details.serial_number', 'dsc_details.expiry_date', 'dsc_details.issuer_common_name', 'userName']
+            }], function (err, users) {
+              Mail.dscExpiry(users)
+
+            })
+
+          }
+        })
+
+        BidderProfile.find({
+          user: {
+            $in: userids
+          }
+        }, {
+            "personProfile.email": 1
+          }, function (err, buser) {
+            if (err) {
+              console.log(err);
+            }
+            if (!buser) {
+              console.log(buser);
+            }
+            if (buser) {
+              var busermail = buser.map(function (item) {
+                return item.personProfile.email
+              })
+              BidderProfile.populate(buser, [{
+                path: 'user',
+                select: ['dsc_details.serial_number', 'dsc_details.expiry_date', 'dsc_details.issuer_common_name', 'userName']
+              }]),
+                function (err, users) {
+                  Mail.dscExpiry(buser)
+                }
+            }
+          })
+      }
+    })
+
+})
+
+
+
+
+var getAlteredDocs = schedule.scheduleJob('0 0 * * *', function () {
+  var tasks = [
+    function getAllPublishedTenders(cb) {
+      TenderLineObjects.find({
+        status: "Published"
+      }, {
+          _id: 1
+        })
+        .exec(function (err, tenderLineObjects) {
+          if (err) {
+            return cb(err)
+          }
+          return cb(null, tenderLineObjects)
+
+        })
+    },
+    function getAllEncryptedDocsIds(tenderLines, cb) {
+      if (tenderLines.length == 0) {
+        return ({
+          msg: 'There is no Tenders'
+        })
+      }
+      var tenderIds = tenderLines.map(function (item) {
+        return item._id;
+      })
+
+      TenderCoversEncryptedDocument.find({
+        tender_lineitem_id: {
+          $in: tenderIds
+        },
+        status: true,
+        is_decrypted: false
+      }).populate([{
+        path: 'tender_lineitem_id',
+        select: ['tender_id', 'tender_lineitem_id', 'tender_lineitem_title'],
+        populate: [{
+          path: "tender_id",
+          select: ['state_cd', 'tender_official_id', 'tender_official_owner', 'tender_official_email_id', 'tender_official_contact_name', 'org_owner'],
+        }]
+      },
+      {
+        path: 'tender_li_doc_created_by',
+        select: ['userName', 'accessId']
+      },
+      {
+        path: 'tender_li_doc_cover_type',
+        select: ['cover_type']
+      }
+
+      ]).exec(function (err, tenderCoversEncryptedDocument) {
+        if (err) {
+          return cb(err)
+        }
+        if (tenderCoversEncryptedDocument.length == 0) {
+          return cb({
+            msg: 'there is no encrypted Documents'
+          })
+        }
+
+        cb(null, tenderCoversEncryptedDocument)
+      })
+    },
+
+    function checkAlterDocs(encryptedDocuments, cb) {
+      var errDocs = [];
+
+      function checkFileIsAltered(i) {
+
+        if (i < encryptedDocuments.length) {
+          const decryptedpath = encryptedDocuments[i].encrypt_folder_name + '/' + encryptedDocuments[i].encrypt_sub_folder_name;
+          if (!_.isEmpty(encryptedDocuments[i].file_meta.toObject())) {
+            FileConfig.listdirectory(decryptedpath, function (filelist) {
+              const file_meta = filelist.data.data[encryptedDocuments[i].alt_encrypted_document_name];
+              if (file_meta.size == encryptedDocuments[i].file_meta.size && file_meta.mtime == encryptedDocuments[i].file_meta.mtime) {
+                checkFileIsAltered(i + 1)
+              } else {
+                errDocs.push({
+                  _id: encryptedDocuments[i]._id,
+                  bidder: encryptedDocuments[i].tender_li_doc_created_by.userName,
+                  tender_lineitem_title: encryptedDocuments[i].tender_lineitem_id.tender_lineitem_title,
+                  tender_lineitem_id: encryptedDocuments[i].tender_lineitem_id.tender_lineitem_id,
+                  tender_official_id: encryptedDocuments[i].tender_lineitem_id.tender_id.tender_official_id,
+                  tender_official_owner: encryptedDocuments[i].tender_lineitem_id.tender_id.tender_official_owner,
+                  tender_official_contact_name: encryptedDocuments[i].tender_lineitem_id.tender_id.tender_official_contact_name,
+                  tender_official_email_id: encryptedDocuments[i].tender_lineitem_id.tender_id.tender_official_email_id,
+                  tender_li_doc_original_file_name: encryptedDocuments[i].tender_li_doc_original_file_name,
+                  org_owner: encryptedDocuments[i].tender_lineitem_id.tender_id.org_owner
+                })
+                checkFileIsAltered(i + 1)
+              }
+            });
+          } else {
+            checkFileIsAltered(i + 1)
+          }
+
+        } else {
+          return cb(null, errDocs);
+        }
+      }
+      checkFileIsAltered(0)
+    },
+
+    function sendMailtoOwner(alteredDocs, cb) {
+      if (alteredDocs.length == 0) {
+        return cb({ msg: 'There is no altered Documents' });
+      }
+      var groupedDocs = _.groupBy(alteredDocs, 'tender_official_email_id');
+      var docKeys = _.keys(groupedDocs);
+      for (let i = 0; i < docKeys.length; i++) {
+        const element = groupedDocs[docKeys[i]];
+        Mail.sendAlterDocEmail(element);
+        if (i == docKeys.length - 1) {
+          return cb(null, alteredDocs)
+        }
+      }
+    },
+    function saveAlteredDocuments(alteredDocs, cb) {
+      if (alteredDocs.length == 0) {
+        return cb({ msg: 'There is no altered Documents' });
+      }
+      function createAlterDocs(i) {
+        if (i < alteredDocs.length) {
+          OrganizationLevelAlteredDocuments.update({ tender_covers_encrypted_document: alteredDocs[i]._id }, { org_owner: alteredDocs[i].org_owner }, { upsert: true }, function (err, alterdocs) {
+            createAlterDocs(i + 1)
+          })
+        } else {
+          return cb(null, alteredDocs);
+        }
+      }
+      createAlterDocs(0)
+
+    }
+
+  ]
+  async.waterfall(tasks, (err, results) => {
+    if (err) {
+      console.log(err);
+    }else {
+      console.log(results.length + ' Documents are altered');
+    }
+
+
+  })
+});
+
+/*
+var generateWormLog = schedule.scheduleJob('0 0 * * *', function () {
+  var pubPem = fs.readFileSync(__dirname + '/Certificates/publickey.pem').toString();
+  var pub = ursa.createPublicKey(pubPem, 'base64');
+  var randomKey = crypto.randomBytes(32).toString('base64');
+  randomKey = new Buffer(randomKey);
+  var encryptedKey = pub.encrypt(randomKey);
+  var now = new Date();
+  var currentDate = dateFormat(now, "ddmmyyyy");
+  var logFileName = currentDate + '.enc';
+  var logFilePath = 'wormlogs';
+  var tdate = new Date();
+  tdate.setDate(tdate.getDate() - 1);
+  tdate.setHours(0, 0, 0, 0)
+  var bdate = new Date(tdate);
+  var now = new Date();
+  now.setHours(0, 0, 0, 0);
+  var nowd = new Date(now);
+
+  TenderLog.find({
+    "createdBy": {
+      $lte: nowd,
+      $gte: bdate
+    }
+  }).populate([{
+    path: 'tender_id',
+    select: ['tender_official_id']
+  },
+  {
+    path: 'tender_lineitem_id',
+    select: ['tender_lineitem_id']
+  },
+  {
+    path: 'user',
+    select: ['userName']
+  }
+  ]).exec(function (err, data) {
+    if (err) {
+      console.log(err)
+    }
+    var h1 = `<link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css">
+     <table class="table">
+        <thead>
+            <tr>
+                <th style = "font-size:6">Tender Id</th>
+                <th style = "font-size:6">Tender Lineitem Id</th>
+                <th style = "font-size:6">User</th>
+                <th style = "font-size:6">Log Id</th>
+                <th style = "font-size:6">Access Id</th>
+                <th style = "font-size:6">User Name</th>
+                <th style = "font-size:6">Tender Item Name</th>
+                <th style = "font-size:6">Official Tender No</th>
+                <th style = "font-size:6">ip Address</th>
+                <th style = "font-size:6">Login Type</th>
+                <th style = "font-size:6">Type</th>
+                <th style = "font-size:6">Type1</th>
+                <th style = "font-size:6">Comment</th>
+                <th style = "font-size:6">Screen Name</th>
+                <th style = "font-size:6">Action Performed</th>
+                <th style = "font-size:6">CreatedBy</th>
+            </tr>
+        </thead>
+        <tbody>`
+
+    var h2 = `</tbody>
+    </table>`
+    var rows = "";
+    for (var i = data.length - 1; i >= 0; i--) {
+      var str = ""
+      var tenderId = data[i]['tender_id'] === undefined ? 'NA' : data[i].tender_id.tender_official_id;
+      var tenderLineItemid = data[i]['tender_lineitem_id'] === undefined ? 'NA' : data[i].tender_lineitem_id.tender_lineitem_id;
+      var userName = data[i].user === undefined ? 'NA' : data[i].user.userName;
+      var logId = data[i].logId === undefined ? 'NA' : data[i].logId;
+      var accessId = data[i].accessId === undefined ? 'NA' : data[i].accessId;
+      var userName = userName === undefined ? 'NA' : data[i].UserName;
+      var tenderitemName = data[i].tenderitem_Name === undefined ? 'NA' : data[i].tenderitem_Name;
+      var officialTenderNo = data[i].official_tenderNo === undefined ? 'NA' : data[i].official_tenderNo;
+      var ipAddress = data[i].ipAddress === undefined ? 'NA' : data[i].ipAddress;
+      var loginType = data[i].logintype === undefined ? 'NA' : data[i].logintype;
+      var type = data[i].type === undefined ? 'NA' : data[i].type;
+      var type1 = data[i].type1 === undefined ? 'NA' : data[i].type1;
+      var comment = data[i].comment === undefined ? 'NA' : data[i].comment;
+      var screenName = data[i].screen_name === undefined ? 'NA' : data[i].screen_name;
+      var actionPerformed = data[i].action_performed === undefined ? 'NA' : data[i].action_performed;
+      var createdBy = data[i].createdBy === undefined ? 'NA' : dateFormat(data[i].createdBy, "dd-mm-yyyy")
+
+      str = `<tr>
+                <td style = "font-size:6">${tenderId}</td>
+                <td style = "font-size:6">${tenderLineItemid}</td>
+                <td style = "font-size:6">${userName}</td>
+                <td style = "font-size:6">${logId}</td>
+                <td style = "font-size:6">${accessId}</td>
+                <td style = "font-size:6">${userName}</td>
+                <td style = "font-size:6">${tenderitemName}</td>
+                <td style = "font-size:6">${officialTenderNo}</td>
+                <td style = "font-size:6">${ipAddress}</td>
+                <td style = "font-size:6">${loginType}</td>
+                <td style = "font-size:6">${type}</td>
+                <td style = "font-size:6">${type1}</td>
+                <td style = "font-size:6">${comment}</td>
+                <td style = "font-size:6">${screenName}</td>
+                <td style = "font-size:6">${actionPerformed}</td>
+                <td style = "font-size:6">${createdBy}</td>
+            </tr>`
+
+      rows += str;
+    }
+    var layout = h1 + rows + h2
+
+    var options = { format: 'Letter' };
+
+    pdf.create(layout).toBuffer(function (err, buffer) {
+      fs.writeFile('decry.pdf', buffer, function (err) {
+        if (err) console.log(err);
+        console.log('decrypted pdf created');
+      });
+      buffer = buffer.toString('base64')
+      console.log('original buffer', new Buffer(buffer.toString(), 'utf8').length);
+
+      var encryptedData = encrypt(new Buffer(buffer.toString(), 'utf8'), randomKey);
+      console.log(encryptedData.length);
+      FileConfig.createdirectory(logFilePath, function (directory) {
+        if (directory.code == 200) {
+          FileConfig.createfile(logFilePath, encryptedData.toString('base64'), logFileName, function (success) {
+            if (success.code == 200) {
+              var temp = {
+                doc_path: logFilePath,
+                filename: logFileName,
+                encrypted_secret_key: encryptedKey.toString('base64'),
+                doc_created_at: new Date()
+              }
+              WormLog.create(temp, function (err, wormLog) {
+                if (err) {
+                  console.log(err)
+                }
+                console.log(wormLog);
+              })
+            };
+          })
+        }
+      })
+    });
+  });
+});
+*/
